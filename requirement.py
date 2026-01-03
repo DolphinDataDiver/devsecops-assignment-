@@ -1,2 +1,3 @@
-flask==1.0
-bcrypt==3.1.0
+flask>=3.0.0,<4.0.0
+bcrypt>=4.1.0
+
