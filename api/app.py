@@ -1,95 +1,147 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import sqlite3
-import pickle
 import subprocess
 import hashlib
 import os
 import logging
+from pathlib import Path
+import json
 
 app = Flask(__name__)
 
-# SECRET HARDCODÉ (mauvaise pratique)
-API_KEY = "API-KEY-123456"
+# -------------------------------------------------------------------
+# Configuration
+# -------------------------------------------------------------------
 
-# Logging non sécurisé
-logging.basicConfig(level=logging.DEBUG)
+API_KEY = os.getenv("API_KEY")  # must be set in environment
+DATABASE = "users.db"
+BASE_DIR = Path("/app/data").resolve()  # allowed file access root
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
+# -------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------
+
+def get_db():
+    return sqlite3.connect(DATABASE)
+
+def hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+def safe_path(filename: str) -> Path:
+    path = (BASE_DIR / filename).resolve()
+    if not str(path).startswith(str(BASE_DIR)):
+        raise ValueError("Invalid file path")
+    return path
+
+# -------------------------------------------------------------------
+# Routes
+# -------------------------------------------------------------------
 
 @app.route("/auth", methods=["POST"])
 def auth():
-    username = request.json.get("username")
-    password = request.json.get("password")
+    data = request.get_json(silent=True) or {}
+    username = data.get("username")
+    password = data.get("password")
 
-    # SQL Injection
-    conn = sqlite3.connect("users.db")
+    if not username or not password:
+        return jsonify({"error": "Missing credentials"}), 400
+
+    conn = get_db()
     cursor = conn.cursor()
-    query = (
-        f"SELECT * FROM users "
-        f"WHERE username='{username}' AND password='{password}'"
+
+    cursor.execute(
+        "SELECT 1 FROM users WHERE username=? AND password=?",
+        (username, hash_text(password))
     )
-    cursor.execute(query)
 
-    if cursor.fetchone():
-        return {"status": "authenticated"}
+    authenticated = cursor.fetchone() is not None
+    conn.close()
 
-    return {"status": "denied"}
+    return jsonify({"status": "authenticated" if authenticated else "denied"})
 
+# -------------------------------------------------------------------
 
 @app.route("/exec", methods=["POST"])
 def exec_cmd():
-    cmd = request.json.get("cmd")
+    """
+    Safe command execution using allowlist
+    """
+    data = request.get_json(silent=True) or {}
+    command = data.get("command")
 
-    # Command Injection
-    output = subprocess.check_output(cmd, shell=True)
-    return {"output": output.decode()}
+    ALLOWED_COMMANDS = {
+        "date": ["date"],
+        "uptime": ["uptime"]
+    }
 
+    if command not in ALLOWED_COMMANDS:
+        return jsonify({"error": "Command not allowed"}), 403
+
+    output = subprocess.check_output(
+        ALLOWED_COMMANDS[command],
+        shell=False,
+        text=True
+    )
+
+    return jsonify({"output": output.strip()})
+
+# -------------------------------------------------------------------
 
 @app.route("/deserialize", methods=["POST"])
 def deserialize():
-    data = request.data
+    """
+    Safe deserialization using JSON
+    """
+    try:
+        data = json.loads(request.data.decode("utf-8"))
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid JSON"}), 400
 
-    # Désérialisation dangereuse
-    obj = pickle.loads(data)
-    return {"object": str(obj)}
+    return jsonify({"object": data})
 
+# -------------------------------------------------------------------
 
 @app.route("/encrypt", methods=["POST"])
 def encrypt():
-    text = request.json.get("text", "")
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
 
-    # Chiffrement faible
-    hashed = hashlib.md5(text.encode()).hexdigest()
-    return {"hash": hashed}
+    return jsonify({"hash": hash_text(text)})
 
+# -------------------------------------------------------------------
 
 @app.route("/file", methods=["POST"])
 def read_file():
-    filename = request.json.get("filename")
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename")
 
-    # Path Traversal
-    with open(filename, "r") as f:
-        return {"content": f.read()}
+    if not filename:
+        return jsonify({"error": "Filename required"}), 400
 
+    try:
+        path = safe_path(filename)
+        with open(path, "r", encoding="utf-8") as f:
+            return jsonify({"content": f.read()})
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "File access denied"}), 403
 
-@app.route("/debug", methods=["GET"])
-def debug():
-    # Divulgation d'informations sensibles
-    return {
-        "api_key": API_KEY,
-        "env": dict(os.environ),
-        "cwd": os.getcwd()
-    }
-
+# -------------------------------------------------------------------
 
 @app.route("/log", methods=["POST"])
 def log_data():
-    data = request.json
+    data = request.get_json(silent=True)
 
-    # Log Injection
-    logging.info(f"User input: {data}")
-    return {"status": "logged"}
+    logging.info("User input received", extra={"payload": data})
+    return jsonify({"status": "logged"})
 
+# -------------------------------------------------------------------
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # Debug explicitly disabled
+    app.run(host="0.0.0.0", port=5000, debug=False)
 
