@@ -5,8 +5,8 @@ RUN useradd -m appuser
 
 WORKDIR /app
 
-# Install dependencies first (better caching)
-COPY requirements.txt .
+# Copy requirements from api directory
+COPY api/requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
